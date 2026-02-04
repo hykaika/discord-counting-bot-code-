@@ -1,4 +1,4 @@
-# discord-counting-bot-code-
+# discord-counting-bot-code
 Discord Counting Bot (German)
 A robust Discord bot built with discord.py to manage a counting game. This bot features mathematical expression parsing, an administrative backup system, and persistent state storage.
 
