@@ -1,330 +1,213 @@
 import discord
 import re
+import json
+import os
+import datetime
+import logging
 from discord.ext import commands
+from discord import app_commands
+from typing import Optional
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+logger = logging.getLogger('CountingBot')
 
-TOKEN = 'DEIN-BOT-Token'
+if not os.path.exists("backups"):
+    os.makedirs("backups")
 
-
-COUNTING_CHANNEL_ID = CHANNEL-ID
+TOKEN = 'Bot-Token'
+COUNTING_CHANNEL_ID = Channel-ID
+GUILD_ID = Server-ID 
+SAVE_FILE = "counting_save.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+
 
 class GameState:
     def __init__(self):
         self.current_number = 0
-        self.last_user = None
-        self.game_active = True
-        self.used_expressions = set()
+        self.high_score = 0
+        self.high_score_holder = "Niemand"
+        self.last_user_id = None
+        self.is_paused = False
+        self.total_mistakes = 0
+
+    def to_dict(self):
+        return {
+            "current_number": self.current_number,
+            "high_score": self.high_score,
+            "high_score_holder": self.high_score_holder,
+            "last_user_id": self.last_user_id,
+            "is_paused": self.is_paused,
+            "total_mistakes": self.total_mistakes
+        }
+
+    def load_dict(self, data):
+        self.current_number = data.get("current_number", 0)
+        self.high_score = data.get("high_score", 0)
+        self.high_score_holder = data.get("high_score_holder", "Niemand")
+        self.last_user_id = data.get("last_user_id", None)
+        self.is_paused = data.get("is_paused", False)
+        self.total_mistakes = data.get("total_mistakes", 0)
 
 game_state = GameState()
 
-def is_safe_expression(expr):
-    """Prüft, ob der Ausdruck sicher ist (nur Zahlen und Grundrechenarten)"""
-   
-    if not re.match(r'^[\d\s\+\-\*\/\(\)]+$', expr):
-        return False
-    
- 
-    if re.search(r'[\+\-\*\/]{2,}', expr):
-        return False
-    
-    
-    if '()' in expr:
-        return False
-    
-    return True
 
-def calculate_expression(expr):
-    """Berechnet einen mathematischen Ausdruck sicher"""
+def save_game(custom_path=None):
+    path = custom_path or SAVE_FILE
     try:
-        
-        if not is_safe_expression(expr):
-            return None
-        
-     
-        expr = expr.replace(' ', '').replace('x', '*').replace('×', '*')
-        
-        
-        result = eval(expr, {"__builtins__": {}}, {})
-        
-        
-        if result in (float('inf'), float('-inf'), float('nan')):
-            return None
-        
-        
-        if isinstance(result, (int, float)):
-            if float(result).is_integer():
-                return int(result)
-            return None  
+        with open(path, "w") as f:
+            json.dump(game_state.to_dict(), f, indent=4)
+        return True
+    except Exception as e:
+        logger.error(f"Fehler beim Speichern ({path}): {e}")
+        return False
+
+def load_game(custom_path=None):
+    path = custom_path or SAVE_FILE
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                game_state.load_dict(json.load(f))
+            return True
+        except Exception as e:
+            logger.error(f"Fehler beim Laden ({path}): {e}")
+    return False
+
+def calculate_expression(expr: str) -> Optional[int]:
+    if not re.match(r'^[\d\s\+\-\*\/\(\)x×]+$', expr):
         return None
+    try:
+        clean_expr = expr.replace('x', '*').replace('×', '*')
+        result = eval(clean_expr, {"__builtins__": {}}, {})
+        if isinstance(result, (int, float)) and not isinstance(result, bool):
+            return int(result) if float(result).is_integer() else None
     except:
         return None
+    return None
+
+
+class CountingBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
+        load_game()
+        guild = discord.Object(id=GUILD_ID)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
+        logger.info(f"✅ Bot bereit und Commands synchronisiert.")
+
+bot = CountingBot()
+
+
+@bot.tree.command(name="ct", description="Löscht eine Anzahl an Nachrichten (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def clear_chat(interaction: discord.Interaction, anzahl: int):
+    await interaction.response.send_message(f"🧹 Lösche {anzahl} Nachrichten...", ephemeral=True)
+    await interaction.channel.purge(limit=anzahl)
+
+@bot.tree.command(name="set-count", description="Setzt den Zähler manuell auf eine Zahl (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_count(interaction: discord.Interaction, zahl: int):
+    game_state.current_number = zahl
+    game_state.last_user_id = None
+    save_game()
+    await interaction.response.send_message(f"✅ Zähler auf **{zahl}** gesetzt. Nächste Zahl: **{zahl + 1}**")
+
+@bot.tree.command(name="save-as", description="Speichert ein Backup des Spielstands (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def save_as(interaction: discord.Interaction, name: str):
+    clean_name = "".join(x for x in name if x.isalnum())
+    path = f"backups/{clean_name}.json"
+    if save_game(path):
+        await interaction.response.send_message(f"💾 Backup `{clean_name}` wurde erstellt.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Fehler beim Speichern.", ephemeral=True)
+
+@bot.tree.command(name="load-from", description="Lädt ein Backup (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def load_from(interaction: discord.Interaction, name: str):
+    clean_name = "".join(x for x in name if x.isalnum())
+    path = f"backups/{clean_name}.json"
+    if load_game(path):
+        save_game()
+        await interaction.response.send_message(f"📂 Backup `{clean_name}` erfolgreich geladen!")
+    else:
+        await interaction.response.send_message(f"❌ Backup `{clean_name}` nicht gefunden.", ephemeral=True)
+
+@bot.tree.command(name="backups-list", description="Zeigt alle verfügbaren Backups (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def list_backups(interaction: discord.Interaction):
+    files = [f.replace(".json", "") for f in os.listdir("backups") if f.endswith(".json")]
+    if not files:
+        await interaction.response.send_message("Keine Backups vorhanden.", ephemeral=True)
+    else:
+        liste = "\n".join([f"- {name}" for name in files])
+        await interaction.response.send_message(f"**Verfügbare Backups:**\n{liste}", ephemeral=True)
+
+@bot.tree.command(name="pause", description="Pausiert das Zählen (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def pause_game(interaction: discord.Interaction):
+    game_state.is_paused = True
+    save_game()
+    await interaction.response.send_message("⏸️ Spiel pausiert.", ephemeral=True)
+
+@bot.tree.command(name="resume", description="Setzt das Zählen fort (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def resume_game(interaction: discord.Interaction):
+    game_state.is_paused = False
+    save_game()
+    await interaction.response.send_message("▶️ Spiel fortgesetzt.", ephemeral=True)
+
+@bot.tree.command(name="stats", description="Zeigt den aktuellen Spielstand")
+async def stats(interaction: discord.Interaction):
+    embed = discord.Embed(title="📊 Counting Stats", color=discord.Color.gold(), timestamp=datetime.datetime.now())
+    embed.add_field(name="Zähler", value=f"**{game_state.current_number}**", inline=True)
+    embed.add_field(name="Nächste Zahl", value=f"**{game_state.current_number + 1}**", inline=True)
+    embed.add_field(name="🏆 Rekord", value=f"**{game_state.high_score}** von {game_state.high_score_holder}", inline=False)
+    await interaction.response.send_message(embed=embed)
+
 
 @bot.event
 async def on_ready():
-    print(f'✅ Bot ist online als {bot.user}')
-    print(f'📊 Counting Channel ID: {COUNTING_CHANNEL_ID}')
-    print('──────────────────────────────')
+    await bot.change_presence(activity=discord.Game(name=f"Zahl {game_state.current_number}"))
 
 @bot.event
-async def on_message(message):
-    
-    if message.author == bot.user:
+async def on_message(message: discord.Message):
+    if message.author.bot or message.channel.id != COUNTING_CHANNEL_ID:
         return
-    
-    
-    if message.channel.id != COUNTING_CHANNEL_ID:
-        return await bot.process_commands(message)
-    
-    content = message.content.strip()
-    
-    
-    if content.startswith('!'):
-        return await bot.process_commands(message)
-    
-   
-    if not game_state.game_active:
+    if game_state.is_paused:
         return
-    
-    
-    if message.author.id == game_state.last_user:
-        await message.add_reaction('🚫')
-        error_msg = await message.channel.send(
-            f'❌ {message.author.mention} darf nicht zweimal hintereinander schreiben!\n'
-            f'**Spiel wird zurückgesetzt! Starte mit 1.**'
-        )
+
+    val = calculate_expression(message.content.strip())
+    if val is None: return
+
+    expected = game_state.current_number + 1
+
+    if message.author.id == game_state.last_user_id:
         game_state.current_number = 0
-        game_state.last_user = None
-        game_state.used_expressions.clear()
+        game_state.last_user_id = None
+        save_game()
+        await message.channel.send(f"❌ {message.author.mention} hat zweimal gezählt! Reset auf 0.")
         return
-    
-   
-    if content.isdigit():
-        user_number = int(content)
-    else:
-        
-        user_number = calculate_expression(content)
-        if user_number is None:
-            await message.add_reaction('❌')
-            await message.channel.send(
-                f'❌ Ungültige Eingabe von {message.author.mention}!\n'
-                f'**Nur Zahlen und + - * / erlaubt. Keine Dezimalzahlen!**\n'
-                f'Spiel wird zurückgesetzt. Starte mit 1.'
-            )
-            game_state.current_number = 0
-            game_state.last_user = None
-            game_state.used_expressions.clear()
-            return
-    
-    
-    expected_number = game_state.current_number + 1
-    
-   
-    if user_number == expected_number:
-      
+
+    if val == expected:
+        game_state.current_number = val
+        game_state.last_user_id = message.author.id
+        if val > game_state.high_score:
+            game_state.high_score = val
+            game_state.high_score_holder = message.author.display_name
+        save_game()
         await message.add_reaction('✅')
-        game_state.current_number = user_number
-        game_state.last_user = message.author.id
-        
-       
-        next_number = user_number + 1
-        embed = discord.Embed(
-            title="✅ Korrekt!",
-            description=f"{message.author.mention} hat **{user_number}** geschrieben.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Nächste Zahl", value=f"**{next_number}**", inline=True)
-        embed.add_field(name="Letzte Zahl", value=game_state.current_number, inline=True)
-        embed.set_footer(text=f"Spieler: {message.author.name}")
-        
-        await message.channel.send(embed=embed, delete_after=15)
     else:
         
-        await message.add_reaction('❌')
-        embed = discord.Embed(
-            title="❌ Fehler!",
-            description=f"{message.author.mention} hat **{user_number}** geschrieben.",
-            color=discord.Color.red()
-        )
-        embed.add_field(name="Erwartet wurde", value=f"**{expected_number}**", inline=True)
-        embed.add_field(name="Spiel wird zurückgesetzt", value="Starte mit 1", inline=True)
-        embed.set_footer(text="Der nächste Spieler beginnt mit 1")
-        
-        await message.channel.send(embed=embed)
         game_state.current_number = 0
-        game_state.last_user = None
-        game_state.used_expressions.clear()
-
-@bot.command(name='start')
-@commands.has_permissions(administrator=True)
-async def start_game(ctx):
-    """Startet das Spiel"""
-    if ctx.channel.id != COUNTING_CHANNEL_ID:
-        return
-    
-    game_state.game_active = True
-    game_state.current_number = 0
-    game_state.last_user = None
-    game_state.used_expressions.clear()
-    
-    embed = discord.Embed(
-        title="🎮 Spiel gestartet!",
-        description="Das Counting-Spiel wurde gestartet.",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Regeln", value="1. Beginne mit **1**\n2. Immer +1 zählen\n3. Kein Spieler darf zweimal hintereinander\n4. Mathe-Ausdrücke erlaubt (+ - * /)", inline=False)
-    embed.add_field(name="Startzahl", value="**1**", inline=True)
-    embed.set_footer(text=f"Admin: {ctx.author.name}")
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='stop')
-@commands.has_permissions(administrator=True)
-async def stop_game(ctx):
-    """Stoppt das Spiel"""
-    if ctx.channel.id != COUNTING_CHANNEL_ID:
-        return
-    
-    game_state.game_active = False
-    embed = discord.Embed(
-        title="⏹️ Spiel gestoppt",
-        description="Das Counting-Spiel wurde pausiert.",
-        color=discord.Color.orange()
-    )
-    embed.add_field(name="Letzte Zahl", value=game_state.current_number, inline=True)
-    embed.set_footer(text=f"Admin: {ctx.author.name}")
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='status')
-async def game_status(ctx):
-    """Zeigt den aktuellen Spielstatus"""
-    if ctx.channel.id != COUNTING_CHANNEL_ID:
-        return
-    
-    embed = discord.Embed(
-        title="📊 Spielstatus",
-        color=discord.Color.blue()
-    )
-    
-    if game_state.game_active:
-        status_text = "✅ Laufend"
-        next_player = f"**{game_state.current_number + 1}**"
-    else:
-        status_text = "⏸️ Pausiert"
-        next_player = "Spiel ist pausiert"
-    
-    embed.add_field(name="Status", value=status_text, inline=True)
-    embed.add_field(name="Aktuelle Zahl", value=game_state.current_number, inline=True)
-    embed.add_field(name="Nächste Zahl", value=next_player, inline=True)
-    
-    if game_state.last_user:
-        user = await bot.fetch_user(game_state.last_user)
-        embed.add_field(name="Letzter Spieler", value=user.mention, inline=True)
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='reset')
-@commands.has_permissions(administrator=True)
-async def reset_game(ctx):
-    """Setzt das Spiel zurück"""
-    if ctx.channel.id != COUNTING_CHANNEL_ID:
-        return
-    
-    game_state.current_number = 0
-    game_state.last_user = None
-    game_state.used_expressions.clear()
-    
-    embed = discord.Embed(
-        title="🔄 Spiel zurückgesetzt",
-        description="Das Spiel wurde auf 0 zurückgesetzt.",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Startzahl", value="**1**", inline=True)
-    embed.set_footer(text=f"Admin: {ctx.author.name}")
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='set')
-@commands.has_permissions(administrator=True)
-async def set_number(ctx, number: int):
-    """Setzt die aktuelle Zahl (Admin)"""
-    if ctx.channel.id != COUNTING_CHANNEL_ID:
-        return
-    
-    if number < 0:
-        await ctx.send("❌ Zahl muss positiv sein!")
-        return
-    
-    game_state.current_number = number
-    game_state.last_user = None
-    game_state.used_expressions.clear()
-    
-    embed = discord.Embed(
-        title="📝 Zahl gesetzt",
-        description=f"Aktuelle Zahl wurde auf **{number}** gesetzt.",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Nächste Zahl", value=f"**{number + 1}**", inline=True)
-    embed.set_footer(text=f"Admin: {ctx.author.name}")
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='rules')
-async def show_rules(ctx):
-    """Zeigt die Spielregeln"""
-    embed = discord.Embed(
-        title="📚 Spielregeln - Counting Game",
-        color=discord.Color.purple()
-    )
-    
-    rules = """
-    1️⃣ **Beginne mit der Zahl 1**
-    2️⃣ **Jeder Spieler erhöht um 1** (1 → 2 → 3 → ...)
-    3️⃣ **Mathematische Ausdrücke erlaubt**: + - * / (z.B. "2+2" für 4)
-    4️⃣ **Keine Dezimalzahlen** - nur ganze Zahlen!
-    5️⃣ **Kein Spieler darf zweimal hintereinander**
-    6️⃣ **Bei Fehler startet das Spiel wieder bei 1**
-    7️⃣ **Nächste Zahl immer: Aktuelle Zahl + 1**
-    """
-    
-    embed.add_field(name="Regeln", value=rules, inline=False)
-    embed.add_field(name="Beispiele", value="• `5` → korrekt nach 4\n• `3*2` → korrekt nach 5\n• `10/2` → korrekt nach 4", inline=False)
-    embed.set_footer(text="Viel Spaß beim Spielen!")
-    
-    await ctx.send(embed=embed)
-
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Du hast keine Berechtigung für diesen Befehl!")
-    elif isinstance(error, commands.CommandNotFound):
-        pass
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send("❌ Ungültige Argumente! Bitte überprüfe deine Eingabe.")
+        game_state.last_user_id = None
+        save_game()
+        await message.channel.send(f"💥 Fehler! {message.author.mention} hat die Kette unterbrochen. Reset!")
+        await message.add_reaction('❌')
 
 if __name__ == '__main__':
-    print("=" * 50)
-    print("Discord Counting Bot made by hykaika")
-    print("=" * 50)
-    print("\n  WICHTIG: Bevor du startest:")
-    print("1. Füge deinen Bot-Token ein (Zeile 6)")
-    print("2. Füge die Channel-ID ein (Zeile 9)")
-    print("3. Aktiviere in Discord Developer Portal:")
-    print("   - MESSAGE CONTENT INTENT")
-    print("   - SERVER MEMBERS INTENT")
-    print("=" * 50)
-    
-    try:
-        bot.run(TOKEN)
-    except discord.LoginFailure:
-        print(" FEHLER: Ungültiger Bot-Token!")
-        print("Bitte überprüfe deinen Token in Zeile 6")
-    except Exception as e:
-
-        print(f" FEHLER: {e}")
-
+    bot.run(TOKEN)
